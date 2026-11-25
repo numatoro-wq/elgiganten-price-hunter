@@ -1,0 +1,1 @@
+# elgiganten-price-hunter
