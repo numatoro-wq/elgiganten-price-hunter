@@ -5,14 +5,15 @@ import urllib.request
 from playwright.sync_api import sync_playwright
 
 NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "elgiganten-glitch-73915"
-MIN_DISCOUNT_PCT = 80.0
-MIN_ORIGINAL_PRICE = 500
+MIN_DISCOUNT_PCT = 80.0     # Alert on 80%+ off (change to 90.0 for 90%+ only)
+MIN_ORIGINAL_PRICE = 500    # Ignore cheap accessories under 500 kr.
 
 URLS_TO_SCAN = [
     "https://www.elgiganten.dk/tilbud",
     "https://www.elgiganten.dk/computer-kontor/computere/barbar-computer",
     "https://www.elgiganten.dk/tv-lyd-smart-home/tv-tilbehor/tv",
-    "https://www.elgiganten.dk/gaming/pc-gaming/gaming-baerbar",
+    "https://www.elgiganten.dk/gaming/gaming-pc",
+    "https://www.elgiganten.dk/gaming/hardware",
     "https://www.elgiganten.dk/mobil-tablet-smartwatch/mobiltelefon",
 ]
 
@@ -54,6 +55,7 @@ def parse_dkk(text):
 def scan():
     alerted = load_alerted()
     new_alerts = 0
+    top_deal = (0.0, "", 0, 0)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -69,10 +71,11 @@ def scan():
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
 
-        # Block heavy images/fonts/ads so the page loads in <3 seconds
         page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2}", lambda route: route.abort())
 
-        for url in URLS_TO_SCAN:
+        for idx, url in enumerate(URLS_TO_SCAN):
+            if idx > 0:
+                page.wait_for_timeout(2000)  # Polite delay to avoid HTTP 429
             print(f"Scanning: {url}", flush=True)
             try:
                 resp = page.goto(url, wait_until="commit", timeout=15000)
@@ -131,8 +134,12 @@ def scan():
                         continue
 
                     discount_pct = ((before_price - now_price) / before_price) * 100
+                    title_line = text.strip().splitlines()[0][:70]
+
+                    if discount_pct > top_deal[0]:
+                        top_deal = (discount_pct, title_line, now_price, before_price)
+
                     if discount_pct >= MIN_DISCOUNT_PCT:
-                        title_line = text.strip().splitlines()[0][:80]
                         print(f"  [GLITCH DEAL] {title_line}: {now_price} kr. (Før {before_price} kr., -{discount_pct:.1f}%)", flush=True)
                         if sku not in alerted:
                             send_ntfy(
@@ -150,6 +157,8 @@ def scan():
 
     if new_alerts > 0:
         save_alerted(alerted)
+    if top_deal[0] > 0:
+        print(f"Highest discount seen this run: -{top_deal[0]:.1f}% ({top_deal[1]}: {top_deal[2]} kr. vs {top_deal[3]} kr.)", flush=True)
     print(f"Done. New glitch alerts sent: {new_alerts}", flush=True)
 
 
