@@ -74,8 +74,7 @@ def scan():
         page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2}", lambda route: route.abort())
 
         for idx, url in enumerate(URLS_TO_SCAN):
-            if idx > 0:
-                page.wait_for_timeout(2000)  # Polite delay to avoid HTTP 429
+            page.wait_for_timeout(2000 if idx > 0 else 1500)
             print(f"Scanning: {url}", flush=True)
             try:
                 resp = page.goto(url, wait_until="commit", timeout=15000)
@@ -135,11 +134,13 @@ def scan():
 
                     discount_pct = ((before_price - now_price) / before_price) * 100
 
-                    # Extract clean product name from the URL slug if first line is a promo badge
+                    # Always prefer the clean product name from the URL slug
                     slug_match = re.search(r"/([^/]+)/\d+(?:$|\?)", href)
-                    slug_name = slug_match.group(1).replace("-", " ").title() if slug_match else ""
-                    first_line = text.strip().splitlines()[0][:70]
-                    title_line = slug_name if (first_line.startswith("*") or len(first_line) < 10) and slug_name else first_line
+                    title_line = (
+                        slug_match.group(1).replace("-", " ").title()
+                        if slug_match
+                        else text.strip().splitlines()[0][:70]
+                    )
 
                     if discount_pct > top_deal[0]:
                         top_deal = (discount_pct, title_line, now_price, before_price)
