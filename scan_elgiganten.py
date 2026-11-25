@@ -134,7 +134,12 @@ def scan():
                         continue
 
                     discount_pct = ((before_price - now_price) / before_price) * 100
-                    title_line = text.strip().splitlines()[0][:70]
+
+                    # Extract clean product name from the URL slug if first line is a promo badge
+                    slug_match = re.search(r"/([^/]+)/\d+(?:$|\?)", href)
+                    slug_name = slug_match.group(1).replace("-", " ").title() if slug_match else ""
+                    first_line = text.strip().splitlines()[0][:70]
+                    title_line = slug_name if (first_line.startswith("*") or len(first_line) < 10) and slug_name else first_line
 
                     if discount_pct > top_deal[0]:
                         top_deal = (discount_pct, title_line, now_price, before_price)
@@ -144,7 +149,7 @@ def scan():
                         if sku not in alerted:
                             send_ntfy(
                                 title=f"-{discount_pct:.0f}% GLITCH: {now_price} kr. (Før {before_price} kr.)",
-                                message=f"{title_line}\nNu: {now_price} kr. | Før: {before_price} kr.\nTryk for at åbne Elgiganten.",
+                                message=f"{title_line}\nNu: {now_price} kr. | Før: {before_price} kr.\n{href}",
                                 click_url=href,
                             )
                             alerted.add(sku)
