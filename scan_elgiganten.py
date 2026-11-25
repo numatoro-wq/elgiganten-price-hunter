@@ -4,10 +4,9 @@ import re
 import urllib.request
 from playwright.sync_api import sync_playwright
 
-# --- CONFIGURATION ---
 NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "elgiganten-glitch-73915"
-MIN_DISCOUNT_PCT = 80.0     # Alert on 80%+ off (change to 90.0 for 90%+ only)
-MIN_ORIGINAL_PRICE = 500    # Ignore cheap accessories under 500 kr.
+MIN_DISCOUNT_PCT = 80.0
+MIN_ORIGINAL_PRICE = 500
 
 URLS_TO_SCAN = [
     "https://www.elgiganten.dk/tilbud",
@@ -49,8 +48,6 @@ def send_ntfy(title, message, click_url):
 
 def parse_dkk(text):
     matches = re.findall(r"(\d{1,3}(?:\.\d{3})*)\.-", text)
-    if not matches:
-        return []
     return [int(m.replace(".", "")) for m in matches]
 
 
@@ -72,26 +69,16 @@ def scan():
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
 
-        for idx, url in enumerate(URLS_TO_SCAN):
+        # Block heavy images/fonts/ads so the page loads in <3 seconds
+        page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2}", lambda route: route.abort())
+
+        for url in URLS_TO_SCAN:
             print(f"Scanning: {url}", flush=True)
             try:
-                page.goto(url, wait_until="networkidle", timeout=35000)
-
-                # Dismiss Danish cookie consent popup if present on first load
-                if idx == 0:
-                    try:
-                        page.locator("button:has-text('Accepter alle'), button:has-text('Tillad alle')").first.click(timeout=3000)
-                        page.wait_for_timeout(1500)
-                    except Exception:
-                        pass
-
-                # Scroll down slightly to trigger lazy-loaded product cards
-                page.mouse.wheel(0, 1200)
-                page.wait_for_timeout(2000)
-
-                page_title = page.title()
-                product_link_count = page.locator('a[href*="/product/"]').count()
-                print(f"  Page title: '{page_title}' | Product links found: {product_link_count}", flush=True)
+                resp = page.goto(url, wait_until="commit", timeout=15000)
+                page.wait_for_timeout(4000)
+                status = resp.status if resp else "No response"
+                print(f"  HTTP {status} | Title: '{page.title()}'", flush=True)
 
                 cards = page.evaluate("""() => {
                     const results = [];
@@ -135,24 +122,18 @@ def scan():
 
                     now_prices = parse_dkk(parts[0])
                     before_prices = parse_dkk(parts[1])
-
                     if not now_prices or not before_prices:
                         continue
 
                     now_price = now_prices[0]
                     before_price = before_prices[0]
-
                     if before_price < MIN_ORIGINAL_PRICE or now_price >= before_price:
                         continue
 
                     discount_pct = ((before_price - now_price) / before_price) * 100
-
                     if discount_pct >= MIN_DISCOUNT_PCT:
                         title_line = text.strip().splitlines()[0][:80]
-                        print(
-                            f"  [GLITCH DEAL] {title_line}: {now_price} kr. (Før {before_price} kr., -{discount_pct:.1f}%)",
-                            flush=True,
-                        )
+                        print(f"  [GLITCH DEAL] {title_line}: {now_price} kr. (Før {before_price} kr., -{discount_pct:.1f}%)", flush=True)
                         if sku not in alerted:
                             send_ntfy(
                                 title=f"-{discount_pct:.0f}% GLITCH: {now_price} kr. (Før {before_price} kr.)",
