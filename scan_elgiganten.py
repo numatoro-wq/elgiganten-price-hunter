@@ -1,14 +1,14 @@
 import json
 import os
 import re
+import urllib.request
 from playwright.sync_api import sync_playwright
 
 # --- CONFIGURATION ---
-NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "elgiganten-glitch-73915"  # <-- Your ntfy topic
+NTFY_TOPIC = os.getenv("NTFY_TOPIC") or "elgiganten-glitch-73915"
 MIN_DISCOUNT_PCT = 80.0     # Alert on 80%+ off (change to 90.0 for 90%+ only)
-MIN_ORIGINAL_PRICE = 500    # Ignore cheap cables/cases under 500 kr.
+MIN_ORIGINAL_PRICE = 500    # Ignore cheap accessories under 500 kr.
 
-# Categories to scan every 5 minutes (add or remove Elgiganten category URLs)
 URLS_TO_SCAN = [
     "https://www.elgiganten.dk/tilbud",
     "https://www.elgiganten.dk/computer-kontor/computere/barbar-computer",
@@ -33,7 +33,6 @@ def save_alerted(alerted_set):
 
 
 def send_ntfy(title, message, click_url):
-    import urllib.request
     req = urllib.request.Request(
         f"https://ntfy.sh/{NTFY_TOPIC}",
         data=message.encode("utf-8"),
@@ -49,8 +48,6 @@ def send_ntfy(title, message, click_url):
 
 
 def parse_dkk(text):
-    """Extracts the main consumer price (incl. VAT) in DKK from card text."""
-    # Matches patterns like '2.499.-' or '599.-'
     matches = re.findall(r"(\d{1,3}(?:\.\d{3})*)\.-", text)
     if not matches:
         return []
@@ -62,20 +59,40 @@ def scan():
     new_alerts = 0
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
         context = browser.new_context(
             locale="da-DK",
+            timezone_id="Europe/Copenhagen",
+            viewport={"width": 1366, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         )
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         page = context.new_page()
 
-        for url in URLS_TO_SCAN:
+        for idx, url in enumerate(URLS_TO_SCAN):
             print(f"Scanning: {url}", flush=True)
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)  # Let product cards finish hydrating
+                page.goto(url, wait_until="networkidle", timeout=35000)
 
-                # Extract product cards containing links to /product/
+                # Dismiss Danish cookie consent popup if present on first load
+                if idx == 0:
+                    try:
+                        page.locator("button:has-text('Accepter alle'), button:has-text('Tillad alle')").first.click(timeout=3000)
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+
+                # Scroll down slightly to trigger lazy-loaded product cards
+                page.mouse.wheel(0, 1200)
+                page.wait_for_timeout(2000)
+
+                page_title = page.title()
+                product_link_count = page.locator('a[href*="/product/"]').count()
+                print(f"  Page title: '{page_title}' | Product links found: {product_link_count}", flush=True)
+
                 cards = page.evaluate("""() => {
                     const results = [];
                     const links = document.querySelectorAll('a[href*="/product/"]');
@@ -83,9 +100,11 @@ def scan():
                     for (const a of links) {
                         const href = a.href;
                         if (seen.has(href)) continue;
-                        // Walk up to the product tile container
-                        let card = a.closest('article, li, [data-testid*="product"], div');
-                        while (card && card.innerText && card.innerText.length < 80 && card.parentElement) {
+                        let card = a.parentElement;
+                        for (let i = 0; i < 6 && card; i++) {
+                            if (card.innerText && card.innerText.includes('Førpris') && card.innerText.length < 1500) {
+                                break;
+                            }
                             card = card.parentElement;
                         }
                         if (!card || !card.innerText) continue;
@@ -104,15 +123,12 @@ def scan():
                     href = item["href"]
                     text = item["text"]
 
-                    # Skip third-party Marketplace sellers (often fake 90% off accessories)
                     if "Sælges af " in text and "Elgiganten" not in text:
                         continue
 
-                    # Extract SKU from URL (trailing digits)
                     sku_match = re.search(r"/(\d+)(?:$|\?)", href)
                     sku = sku_match.group(1) if sku_match else href
 
-                    # Split into current price block vs Førpris block
                     parts = text.split("Førpris:")
                     if len(parts) < 2:
                         continue
@@ -123,7 +139,6 @@ def scan():
                     if not now_prices or not before_prices:
                         continue
 
-                    # Elgiganten shows incl. VAT first, excl. VAT second
                     now_price = now_prices[0]
                     before_price = before_prices[0]
 
